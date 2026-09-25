@@ -2,14 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import type { Session } from "@supabase/supabase-js";
 import { useTheme } from "next-themes";
-import { Sun, Moon, Trash2, Menu } from "lucide-react";
+import { Sun, Moon, Trash2, Menu, Sparkles } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { mockAuth } from "@/utils/auth";
-import { localRetrieve } from "@/utils/retrieval";
+import { localRetrieve, getGeminiApiKey } from "@/utils/retrieval";
 import { toast } from "sonner";
 import { ArchiveSidebar } from "@/components/ArchiveSidebar";
 import { ConversationTurn, ChatTurn } from "@/components/ConversationTurn";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { ApiKeyModal } from "@/components/ApiKeyModal";
 import { MANUALS } from "@/data/manuals";
 
 const STARTER_PROMPTS = [
@@ -28,11 +29,17 @@ const Index = () => {
   const [authReady, setAuthReady] = useState(false);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState("");
-  const [activeManual, setActiveManual] = useState(MANUALS[0].id);
+  const [activeManual, setActiveManual] = useState("all");
   const [submitting, setSubmitting] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [keyModalOpen, setKeyModalOpen] = useState(false);
+  const [hasApiKey, setHasApiKey] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    setHasApiKey(!!getGeminiApiKey());
+  }, []);
 
   // ── Auth ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -88,21 +95,27 @@ const Index = () => {
     try {
       let data: { answer?: string; citations?: any[]; followups?: string[]; error?: string } | null = null;
 
-      // Try remote Supabase Edge Function first
-      try {
-        const res = await supabase.functions.invoke("retrieve", {
-          body: { query: trimmed },
-        });
-        if (!res.error && res.data && !res.data.error) {
-          data = res.data;
-        }
-      } catch (remoteErr) {
-        console.warn("Supabase edge function unavailable, falling back to local RAG:", remoteErr);
-      }
-
-      // Fallback: local retrieval engine
-      if (!data) {
+      // Try local/direct Gemini retrieval first if API key is configured
+      const directKey = getGeminiApiKey();
+      if (directKey) {
         data = await localRetrieve(trimmed, activeManual);
+      } else {
+        // Try remote Supabase Edge Function first
+        try {
+          const res = await supabase.functions.invoke("retrieve", {
+            body: { query: trimmed },
+          });
+          if (!res.error && res.data && !res.data.error) {
+            data = res.data;
+          }
+        } catch (remoteErr) {
+          console.warn("Supabase edge function unavailable, falling back to local RAG:", remoteErr);
+        }
+
+        // Fallback: local retrieval engine
+        if (!data) {
+          data = await localRetrieve(trimmed, activeManual);
+        }
       }
 
       setTurns((prev) =>
@@ -189,6 +202,22 @@ const Index = () => {
 
           {/* Right-side controls */}
           <div className="flex items-center gap-2 shrink-0">
+            {/* Gemini API Key Configuration */}
+            <button
+              onClick={() => setKeyModalOpen(true)}
+              className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-sm border transition-colors ${
+                hasApiKey
+                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20"
+                  : "border-border text-muted-foreground hover:text-foreground hover:bg-secondary"
+              }`}
+              title="Configure Gemini AI Key"
+            >
+              <Sparkles size={13} className={hasApiKey ? "text-emerald-500" : ""} />
+              <span className="font-mono-archive text-[0.65rem] tracking-wider uppercase font-medium">
+                {hasApiKey ? "Gemini AI: Active" : "Connect AI"}
+              </span>
+            </button>
+
             <div className="text-[0.65rem] text-muted-foreground border border-border px-2 py-1 rounded-sm font-mono-archive uppercase tracking-wider hidden sm:block">
               Strict Retrieval Mode
             </div>
@@ -328,6 +357,12 @@ const Index = () => {
           </div>
         </div>
       </main>
+
+      <ApiKeyModal
+        open={keyModalOpen}
+        onOpenChange={setKeyModalOpen}
+        onKeySaved={() => setHasApiKey(!!getGeminiApiKey())}
+      />
     </div>
   );
 };

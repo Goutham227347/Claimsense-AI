@@ -65,6 +65,22 @@ const SidebarContent = ({
           Indexed Repositories
         </h2>
         <ul className="flex flex-col gap-1">
+          <li>
+            <button
+              onClick={() => onSelect("all")}
+              className={`w-full text-left text-sm py-1.5 px-2 -mx-2 rounded transition-colors ${
+                activeManualId === "all"
+                  ? "bg-border text-foreground font-medium border-l-2 border-accent"
+                  : "text-muted-foreground hover:text-foreground hover:bg-border/60"
+              }`}
+            >
+              <div className="truncate font-medium">All Repositories</div>
+              <div className="text-[0.65rem] text-muted-foreground/80 font-mono-archive mt-0.5">
+                Search across all indexed manuals
+              </div>
+            </button>
+          </li>
+
           {SEED_MANUALS.map((m) => {
             const active = m.id === activeManualId;
             return (
@@ -86,26 +102,36 @@ const SidebarContent = ({
             );
           })}
 
-          {uploaded.map((m) => (
-            <li key={m.id}>
-              <div className="w-full text-left text-sm py-1.5 px-2 -mx-2 rounded text-muted-foreground">
-                <div className="truncate text-foreground">{m.title}</div>
-                <div className="text-[0.65rem] font-mono-archive mt-0.5 flex items-center gap-1.5">
-                  <span>{m.code} · {m.edition}</span>
-                  <span className="text-border" aria-hidden>·</span>
-                  {m.status === "ready" && (
-                    <span className="text-accent">{m.chunk_count} chunks</span>
-                  )}
-                  {m.status === "processing" && (
-                    <span className="text-muted-foreground italic">indexing…</span>
-                  )}
-                  {m.status === "failed" && (
-                    <span className="text-destructive" title={m.error ?? ""}>failed</span>
-                  )}
-                </div>
-              </div>
-            </li>
-          ))}
+          {uploaded.map((m) => {
+            const active = m.id === activeManualId;
+            return (
+              <li key={m.id}>
+                <button
+                  onClick={() => onSelect(m.id)}
+                  className={`w-full text-left text-sm py-1.5 px-2 -mx-2 rounded transition-colors ${
+                    active
+                      ? "bg-border text-foreground font-medium border-l-2 border-accent"
+                      : "text-muted-foreground hover:text-foreground hover:bg-border/60"
+                  }`}
+                >
+                  <div className="truncate text-foreground font-medium">{m.title}</div>
+                  <div className="text-[0.65rem] font-mono-archive mt-0.5 flex items-center gap-1.5">
+                    <span>{m.code} · {m.edition}</span>
+                    <span className="text-border" aria-hidden>·</span>
+                    {m.status === "ready" && (
+                      <span className="text-accent">{m.chunk_count} chunks</span>
+                    )}
+                    {m.status === "processing" && (
+                      <span className="text-muted-foreground italic">indexing…</span>
+                    )}
+                    {m.status === "failed" && (
+                      <span className="text-destructive" title={m.error ?? ""}>failed</span>
+                    )}
+                  </div>
+                </button>
+              </li>
+            );
+          })}
         </ul>
 
         {/* Upload button */}

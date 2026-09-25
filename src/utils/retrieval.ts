@@ -1,25 +1,88 @@
 import { CHUNKS, ManualChunk } from "@/data/manuals";
 
+// ─── API Key Management ──────────────────────────────────────────────────────
+export const GEMINI_STORAGE_KEY = "claimsense_gemini_api_key";
+
+export function getGeminiApiKey(): string {
+  if (typeof window !== "undefined") {
+    const fromStorage = localStorage.getItem(GEMINI_STORAGE_KEY);
+    if (fromStorage && fromStorage.trim().length > 0) {
+      return fromStorage.trim();
+    }
+  }
+  const fromEnv = import.meta.env.VITE_GEMINI_API_KEY;
+  if (fromEnv && typeof fromEnv === "string" && fromEnv.trim().length > 0) {
+    return fromEnv.trim();
+  }
+  return "";
+}
+
+export function setGeminiApiKey(key: string) {
+  if (typeof window !== "undefined") {
+    if (key.trim()) {
+      localStorage.setItem(GEMINI_STORAGE_KEY, key.trim());
+    } else {
+      localStorage.removeItem(GEMINI_STORAGE_KEY);
+    }
+  }
+}
+
 // ─── Stopwords ──────────────────────────────────────────────────────────────
 const STOPWORDS = new Set(
-  "a an the of and or to for in on at by from with is are was were be been being do does did have has had this that these those it its as if not no but i you he she we they my our your their what which who when where why how can could should would may might will".split(
+  "a an the of and or to for in on at by from with is are was were be been being do does did have has had this that these those it its as if not no but i you he she we they my our your their what which who when where why how can could should would may might will tell me about explain".split(
     " "
   )
 );
 
+// Common insurance synonyms mapping for smarter keyword expansion
+const SYNONYMS: Record<string, string[]> = {
+  car: ["auto", "vehicle"],
+  cars: ["auto", "vehicle"],
+  automobile: ["auto", "vehicle"],
+  automobiles: ["auto", "vehicle"],
+  truck: ["auto", "vehicle"],
+  stole: ["stolen", "theft", "larceny"],
+  stolen: ["theft", "larceny", "auto"],
+  theft: ["stolen", "larceny"],
+  robbery: ["theft", "stolen"],
+  robbed: ["theft", "stolen"],
+  storm: ["windstorm", "hail"],
+  hurricane: ["windstorm", "hail"],
+  tornado: ["windstorm"],
+  rain: ["water", "flood"],
+  leak: ["water", "sprinkler"],
+  fire: ["flame", "peril"],
+  injury: ["injured", "worker", "ttd", "disability", "medical"],
+  injured: ["injury", "worker", "ttd", "disability"],
+  hurt: ["injury", "disability", "medical"],
+  empty: ["vacant", "vacancy"],
+  unoccupied: ["vacant", "vacancy"],
+  blackout: ["power", "utility", "outage"],
+  electricity: ["power", "utility"],
+  form: ["report", "proof", "endorsement", "wc-1"],
+  paperwork: ["documentation", "proof", "report"],
+  papers: ["documentation", "proof"],
+};
+
 // ─── Tokeniser ──────────────────────────────────────────────────────────────
 export function tokenize(s: string): string[] {
-  return s
+  const words = s
     .toLowerCase()
     .replace(/[^a-z0-9\s-]/g, " ")
     .split(/\s+/)
     .filter((t) => t.length > 2 && !STOPWORDS.has(t));
+
+  const expanded: string[] = [];
+  for (const w of words) {
+    expanded.push(w);
+    if (SYNONYMS[w]) {
+      expanded.push(...SYNONYMS[w]);
+    }
+  }
+  return Array.from(new Set(expanded));
 }
 
 // ─── TF-IDF-style scoring with field boosts ──────────────────────────────────
-// Heading / section title terms are 3× more important than body text.
-// This prevents a chunk with dozens of generic body-text keyword hits from
-// beating a chunk that directly names the topic in its heading.
 export function score(query: string, c: ManualChunk): number {
   const qTokens = tokenize(query);
   if (qTokens.length === 0) return 0;
@@ -30,7 +93,7 @@ export function score(query: string, c: ManualChunk): number {
   // High-weight: heading + section (exact topic match)
   const headingTokens = tokenize(`${c.heading} ${c.section}`);
   for (const t of headingTokens) {
-    if (qSet.has(t)) hits += 3;
+    if (qSet.has(t)) hits += 3.5;
   }
 
   // Standard-weight: manual title (domain match)
@@ -45,11 +108,13 @@ export function score(query: string, c: ManualChunk): number {
     if (qSet.has(t)) hits += 1;
   }
 
-  // Bonus: every unique query token found (coverage reward)
-  const uniqueHits = qTokens.filter((qt) =>
-    [...headingTokens, ...titleTokens, ...bodyTokens].includes(qt)
-  ).length;
-  hits += uniqueHits * 0.5;
+  // Bonus: unique query token coverage
+  const allChunkTokens = new Set([...headingTokens, ...titleTokens, ...bodyTokens]);
+  let matchedUnique = 0;
+  for (const qt of qTokens) {
+    if (allChunkTokens.has(qt)) matchedUnique++;
+  }
+  hits += matchedUnique * 1.5;
 
   return hits;
 }
@@ -80,6 +145,96 @@ function loadLocalChunks(): ManualChunk[] {
   }
 }
 
+// ─── Gemini API Integration ──────────────────────────────────────────────────
+async function callGeminiAI(
+  query: string,
+  chunks: ManualChunk[],
+  apiKey: string
+): Promise<{ answer: string; followups: string[] } | null> {
+  if (!apiKey) return null;
+
+  const context = chunks
+    .map(
+      (c, i) =>
+        `[#${i + 1}] ID: ${c.id}\nManual: ${c.manual_title}\nSection: ${c.section} (Page ${c.page})\nHeading: "${c.heading}"\nText: ${c.text}`
+    )
+    .join("\n\n---\n\n");
+
+  const systemPrompt = `You are ClaimSense AI, a rigorous policy retrieval assistant for claim handlers and insurance trainees.
+Answer the user's question accurately and strictly based on the provided manual passages.
+
+RULES:
+1. Ground your answer in the supplied manual passages. Every key fact must cite its source passage inline with [#1], [#2], etc. matching the context passage numbers.
+2. If the passages do not contain enough info, state clearly what the manual says and note any missing details. Do not invent facts or form numbers.
+3. Be professional, clear, and well structured. Use bold headings or numbered lists where helpful.
+4. At the very end of your response, provide exactly 2 helpful follow-up questions in this format:
+FOLLOW_UPS:
+- [Follow-up question 1]
+- [Follow-up question 2]`;
+
+  const userContent = `AVAILABLE MANUAL PASSAGES:\n\n${context}\n\nUSER QUESTION:\n${query}`;
+
+  const modelsToTry = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"];
+
+  for (const model of modelsToTry) {
+    try {
+      const resp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [
+              {
+                role: "user",
+                parts: [{ text: `${systemPrompt}\n\n${userContent}` }],
+              },
+            ],
+            generationConfig: {
+              temperature: 0.2,
+              maxOutputTokens: 1024,
+            },
+          }),
+        }
+      );
+
+      if (!resp.ok) {
+        const errJson = await resp.json().catch(() => null);
+        console.warn(`Gemini (${model}) returned status ${resp.status}:`, errJson);
+        continue;
+      }
+
+      const data = await resp.json();
+      const textOutput = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!textOutput) continue;
+
+      let answer = textOutput.trim();
+      const followups: string[] = [];
+
+      const parts = answer.split(/FOLLOW_UPS:/i);
+      if (parts.length > 1) {
+        answer = parts[0].trim();
+        const rawFollowUps = parts[1].split("\n");
+        for (const line of rawFollowUps) {
+          const clean = line.replace(/^[\s*•\-\d.)]+/, "").trim();
+          if (clean.length > 4) {
+            followups.push(clean);
+          }
+        }
+      }
+
+      return {
+        answer,
+        followups: followups.slice(0, 3),
+      };
+    } catch (e) {
+      console.warn(`Failed calling Gemini (${model}):`, e);
+    }
+  }
+
+  return null;
+}
+
 // ─── Main entry point ────────────────────────────────────────────────────────
 export async function localRetrieve(
   query: string,
@@ -91,17 +246,16 @@ export async function localRetrieve(
   let candidates = allChunks;
   if (activeManualId && activeManualId !== "all") {
     const filtered = allChunks.filter((c) => c.manual_id === activeManualId);
-    // Only narrow corpus if there are actually chunks for that manual
     if (filtered.length > 0) candidates = filtered;
   }
 
-  // Score & rank
+  // Score & rank candidates
   let ranked = candidates
     .map((c) => ({ chunk: c, s: score(query, c) }))
     .filter((r) => r.s > 0)
     .sort((a, b) => b.s - a.s);
 
-  // If filtering by manual yields no results, search the full corpus
+  // If filtering narrowed down too much, fallback to all chunks
   if (ranked.length === 0 && candidates !== allChunks) {
     ranked = allChunks
       .map((c) => ({ chunk: c, s: score(query, c) }))
@@ -109,20 +263,10 @@ export async function localRetrieve(
       .sort((a, b) => b.s - a.s);
   }
 
-  const topChunks = ranked.slice(0, 4).map((r) => r.chunk);
-
+  // If still no direct keyword hits, take representative chunks so AI can still synthesize
+  let topChunks = ranked.slice(0, 4).map((r) => r.chunk);
   if (topChunks.length === 0) {
-    return {
-      answer:
-        "No matching passages were retrieved from the indexed manuals. " +
-        "Rephrase the query using policy terminology (e.g., 'ACV', 'endorsement', " +
-        "'Proof of Loss') or verify the selected manual repository.",
-      citations: [],
-      followups: [
-        "What are the general proof of loss submission rules?",
-        "What perils are covered under auto comprehensive?",
-      ],
-    };
+    topChunks = (candidates.length > 0 ? candidates : allChunks).slice(0, 3);
   }
 
   const citations: RetrievalCitation[] = topChunks.map((c) => ({
@@ -134,6 +278,23 @@ export async function localRetrieve(
     excerpt: c.text,
   }));
 
+  // 1. Try Gemini API first if configured
+  const apiKey = getGeminiApiKey();
+  if (apiKey) {
+    const geminiResult = await callGeminiAI(query, topChunks, apiKey);
+    if (geminiResult && geminiResult.answer) {
+      return {
+        answer: geminiResult.answer,
+        citations,
+        followups:
+          geminiResult.followups.length > 0
+            ? geminiResult.followups
+            : ["What documentation is required?", "Does this apply to other perils?"],
+      };
+    }
+  }
+
+  // 2. Fallback: Local rule-based synthesis
   const synthesis = synthesize(query, topChunks);
   return { answer: synthesis.answer, citations, followups: synthesis.followups };
 }
@@ -151,7 +312,13 @@ function synthesize(
   const q = query.toLowerCase();
 
   // ── Roof / HO-3 / depreciation / windstorm ────────────────────────────────
-  if (q.includes("roof") || q.includes("depreciation") || q.includes("windstorm") || q.includes("ho-3")) {
+  if (
+    q.includes("roof") ||
+    q.includes("depreciation") ||
+    q.includes("windstorm") ||
+    q.includes("hail") ||
+    q.includes("ho-3")
+  ) {
     const c1 = citeIdx(chunks, "pc-2");
     const c2 = citeIdx(chunks, "pc-1", 2);
     return {
@@ -170,8 +337,15 @@ function synthesize(
     };
   }
 
-  // ── Auto theft / stolen vehicle ───────────────────────────────────────────
-  if (q.includes("stolen") || q.includes("theft") || q.includes("larceny") || q.includes("vehicle") || q.includes("auto")) {
+  // ── Auto theft / stolen vehicle / car damage ──────────────────────────────
+  if (
+    q.includes("stolen") ||
+    q.includes("theft") ||
+    q.includes("larceny") ||
+    q.includes("vehicle") ||
+    q.includes("auto") ||
+    q.includes("car")
+  ) {
     const c1 = citeIdx(chunks, "auto-2");
     const c2 = citeIdx(chunks, "auto-1", 2);
     const c3 = citeIdx(chunks, "auto-3", 3);
@@ -194,7 +368,13 @@ function synthesize(
   }
 
   // ── Power failure / utility / business income ──────────────────────────────
-  if (q.includes("power") || q.includes("utility") || q.includes("business income") || q.includes("spoilage") || q.includes("outage")) {
+  if (
+    q.includes("power") ||
+    q.includes("utility") ||
+    q.includes("business income") ||
+    q.includes("spoilage") ||
+    q.includes("outage")
+  ) {
     const c1 = citeIdx(chunks, "comm-2");
     const c2 = citeIdx(chunks, "comm-1", 2);
     const c3 = citeIdx(chunks, "pc-4", 3);
@@ -215,7 +395,15 @@ function synthesize(
   }
 
   // ── Workers' comp / injury / TTD / first report ───────────────────────────
-  if (q.includes("injury") || q.includes("worker") || q.includes("comp") || q.includes("ttd") || q.includes("disability") || q.includes("first report") || q.includes("wc-1")) {
+  if (
+    q.includes("injury") ||
+    q.includes("worker") ||
+    q.includes("comp") ||
+    q.includes("ttd") ||
+    q.includes("disability") ||
+    q.includes("first report") ||
+    q.includes("wc-1")
+  ) {
     const c1 = citeIdx(chunks, "wc-1");
     const c2 = citeIdx(chunks, "wc-2", 2);
     return {
@@ -236,7 +424,13 @@ function synthesize(
   }
 
   // ── Proof of Loss / documentation / settlement ────────────────────────────
-  if (q.includes("proof of loss") || q.includes("documentation") || q.includes("settlement") || q.includes("acs") || q.includes("acv")) {
+  if (
+    q.includes("proof of loss") ||
+    q.includes("documentation") ||
+    q.includes("settlement") ||
+    q.includes("acs") ||
+    q.includes("acv")
+  ) {
     const c1 = citeIdx(chunks, "pc-3");
     const c2 = citeIdx(chunks, "pc-1", 2);
     return {
@@ -274,19 +468,22 @@ function synthesize(
     };
   }
 
-  // ── Generic fallback — stitch together top passages ───────────────────────
-  const paragraphs = chunks
+  // ── Generic grounded synthesis with inline citations ─────────────────────
+  const passages = chunks
     .map(
       (c, i) =>
-        `According to *${c.manual_title}* (${c.section}, p. ${c.page}) — "${c.heading}":\n${c.text} [#${i + 1}]`
+        `**From ${c.manual_title}** (${c.section}, p. ${c.page} — *${c.heading}*):\n> "${c.text}" [#${i + 1}]`
     )
     .join("\n\n");
 
   return {
-    answer: `Based on the retrieved manual passages:\n\n${paragraphs}`,
+    answer:
+      `Based on the policy manual passages retrieved for your query:\n\n` +
+      `${passages}\n\n` +
+      `*Tip: You can add a Gemini API key via the Key icon at the top to enable full AI answers for any query.*`,
     followups: [
-      `What are the documentation duties under ${chunks[0].manual_title}?`,
-      `How does ${chunks[0].section} apply to loss settlement?`,
+      `What documentation is required under ${chunks[0]?.manual_title ?? "this policy"}?`,
+      `How does ${chunks[0]?.section ?? "the endorsement"} affect claim payouts?`,
     ],
   };
 }
