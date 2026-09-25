@@ -245,6 +245,37 @@ export async function localRetrieve(
   query: string,
   activeManualId?: string
 ): Promise<RetrievalResult> {
+  const cleanQ = query.trim().toLowerCase().replace(/[^a-z\s]/g, "");
+  const isGreeting =
+    /^(hi|hello|hey|howdy|good morning|good afternoon|good evening|test|testing|who are you|what can you do|help)\b/i.test(
+      cleanQ
+    ) ||
+    cleanQ === "hey" ||
+    cleanQ === "hi" ||
+    cleanQ === "hello" ||
+    cleanQ.includes("you there") ||
+    cleanQ.includes("you thier") ||
+    cleanQ.includes("are you");
+
+  if (isGreeting) {
+    return {
+      answer:
+        "Hello! I am **ClaimSense AI**, your automated claims documentation and policy guidance assistant.\n\n" +
+        "I am active and ready to help you search your indexed manuals. You can ask me questions about:\n\n" +
+        "• **Property & Casualty (HO-3)**: Loss settlement, 15-year roof depreciation, proof of loss submission.\n" +
+        "• **Auto Comprehensive**: Stolen-vehicle claim documentation, rental reimbursement, covered perils.\n" +
+        "• **Commercial Liability**: Utility failure endorsements, business income loss, 60-day vacancy provisions.\n" +
+        "• **Workers' Compensation**: Form WC-1 filing deadlines and Temporary Total Disability (TTD) benefits.\n\n" +
+        "Try asking any claim question below or click a suggested prompt!",
+      citations: [],
+      followups: [
+        "What documentation is required to file a stolen-vehicle comprehensive claim?",
+        "Is depreciation applied to roof replacement under HO-3, and what is the maximum roof age?",
+        "When does business income coverage apply during an off-premises power failure?",
+      ],
+    };
+  }
+
   const allChunks = [...CHUNKS, ...loadLocalChunks()];
 
   // Filter by active manual (if one is specifically selected)
